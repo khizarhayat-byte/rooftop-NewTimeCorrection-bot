@@ -1,5 +1,5 @@
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
-const https = require('https');
+const { execSync } = require('child_process');
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
@@ -10,46 +10,17 @@ const CLIENT_ID        = process.env.CLIENT_ID;
 const APPS_SCRIPT_URL  = process.env.APPS_SCRIPT_URL;
 const ALLOWED_CHANNELS = ['tech-support'];
 
-// Apps Script requires following redirects manually
+// Use curl to POST — handles Apps Script redirects reliably
 function postToSheet(payload) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify(payload);
-
-    function doRequest(url) {
-      const urlObj = new URL(url);
-      const options = {
-        hostname: urlObj.hostname,
-        path: urlObj.pathname + urlObj.search,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body)
-        }
-      };
-
-      const req = https.request(options, res => {
-        // Follow redirect (Apps Script returns 302)
-        if (res.statusCode === 301 || res.statusCode === 302) {
-          return doRequest(res.headers.location);
-        }
-
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => {
-          try {
-            resolve(JSON.parse(data));
-          } catch (e) {
-            reject(new Error('Invalid JSON response: ' + data));
-          }
-        });
-      });
-
-      req.on('error', reject);
-      req.write(body);
-      req.end();
+    try {
+      const body = JSON.stringify(payload);
+      const cmd  = `curl -s -L -X POST "${APPS_SCRIPT_URL}" -H "Content-Type: application/json" -d '${body.replace(/'/g, "'\\''")}'`;
+      const result = execSync(cmd, { timeout: 15000 }).toString();
+      resolve(JSON.parse(result));
+    } catch (err) {
+      reject(err);
     }
-
-    doRequest(APPS_SCRIPT_URL);
   });
 }
 
