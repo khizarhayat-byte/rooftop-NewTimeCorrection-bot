@@ -1,5 +1,6 @@
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
-const { execSync } = require('child_process');
+const https = require('https');
+const http  = require('http');
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
@@ -10,17 +11,83 @@ const CLIENT_ID        = process.env.CLIENT_ID;
 const APPS_SCRIPT_URL  = process.env.APPS_SCRIPT_URL;
 const ALLOWED_CHANNELS = ['tech-support'];
 
-// Use curl to POST — handles Apps Script redirects reliably
 function postToSheet(payload) {
   return new Promise((resolve, reject) => {
-    try {
-      const body = JSON.stringify(payload);
-      const cmd  = `curl -s -L -X POST "${APPS_SCRIPT_URL}" -H "Content-Type: application/json" -d '${body.replace(/'/g, "'\\''")}'`;
-      const result = execSync(cmd, { timeout: 15000 }).toString();
-      resolve(JSON.parse(result));
-    } catch (err) {
-      reject(err);
+    const body = JSON.stringify(payload);
+
+    function doRequest(urlStr, redirectCount) {
+      if (redirectCount > 10) return reject(new Error('Too many redirects'));
+
+      const url     = new URL(urlStr);
+      const lib     = url.protocol === 'https:' ? https : http;
+      const options = {
+        hostname: url.hostname,
+        port:     url.port || (url.protocol === 'https:' ? 443 : 80),
+        path:     url.pathname + url.search,
+        method:   'POST',
+        headers:  {
+          'Content-Type':   'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          'User-Agent':     'Node.js'
+        }
+      };
+
+      const req = lib.request(options, res => {
+        if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+          const location = res.headers.location;
+          // Drain the response before following redirect
+          res.resume();
+          // GET on redirect (Apps Script pattern)
+          return doGet(location, redirectCount + 1);
+        }
+
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)); }
+          catch (e) { reject(new Error('Bad JSON: ' + data.slice(0, 200))); }
+        });
+      });
+
+      req.on('error', reject);
+      req.setTimeout(15000, () => { req.destroy(); reject(new Error('Request timed out')); });
+      req.write(body);
+      req.end();
     }
+
+    // After redirect Apps Script expects GET
+    function doGet(urlStr, redirectCount) {
+      if (redirectCount > 10) return reject(new Error('Too many redirects'));
+
+      const url  = new URL(urlStr);
+      const lib  = url.protocol === 'https:' ? https : http;
+      const opts = {
+        hostname: url.hostname,
+        port:     url.port || (url.protocol === 'https:' ? 443 : 80),
+        path:     url.pathname + url.search,
+        method:   'GET',
+        headers:  { 'User-Agent': 'Node.js' }
+      };
+
+      const req = lib.request(opts, res => {
+        if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+          res.resume();
+          return doGet(res.headers.location, redirectCount + 1);
+        }
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)); }
+          catch (e) { reject(new Error('Bad JSON: ' + data.slice(0, 200))); }
+        });
+      });
+
+      req.on('error', reject);
+      req.setTimeout(15000, () => { req.destroy(); reject(new Error('Request timed out')); });
+      req.end();
+    }
+
+    doRequest(APPS_SCRIPT_URL, 0);
   });
 }
 
